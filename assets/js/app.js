@@ -33,11 +33,19 @@
   if (guest) $('#guestLine b').textContent = guest;
 
   /* ---------- Ảnh (có khung thay thế nếu thiếu) ---------- */
+  // Ảnh nằm trong một lớp .img riêng để có thể zoom/parallax mà không làm méo khung
   const setPhoto = (el, src) => {
     el.classList.add('placeholder'); el.dataset.mono = mono;
     if (!src) return;
     const img = new Image();
-    img.onload = () => { el.style.backgroundImage = `url("${src}")`; el.classList.remove('placeholder'); };
+    img.onload = () => {
+      const layer = document.createElement('i');
+      layer.className = 'img';
+      layer.style.backgroundImage = `url("${src}")`;
+      el.prepend(layer);
+      el.classList.remove('placeholder');
+      requestAnimationFrame(() => layer.classList.add('loaded'));
+    };
     img.src = src;
   };
   const photoMap = { cover: D.cover || D.photos[0], groom: D.groom.photo, bride: D.bride.photo };
@@ -59,7 +67,7 @@
     playMusic();
     setTimeout(() => {
       intro.classList.add('gone');
-      document.body.classList.remove('locked');
+      document.body.classList.remove('locked'); window.__lenis?.start();
       startHero();
     }, reduce ? 50 : 1900);
     setTimeout(() => intro.remove(), 3200);
@@ -154,9 +162,9 @@
   };
   $('#gallery').addEventListener('click', e => {
     const g = e.target.closest('.g'); if (!g) return;
-    show(+g.dataset.i); lb.hidden = false; document.body.style.overflow = 'hidden';
+    show(+g.dataset.i); lb.hidden = false; document.body.style.overflow = 'hidden'; window.__lenis?.stop();
   });
-  const closeLb = () => { lb.hidden = true; document.body.style.overflow = ''; };
+  const closeLb = () => { if (lb.hidden) return; lb.hidden = true; document.body.style.overflow = ''; window.__lenis?.start(); };
   lb.addEventListener('click', e => {
     const a = e.target.dataset.lb;
     if (a === 'close' || e.target === lb) closeLb();
@@ -215,9 +223,9 @@
   }).join('');
   const openGift = () => {
     $('#giftOpen').classList.add('pop');
-    setTimeout(() => { giftModal.hidden = false; document.body.style.overflow = 'hidden'; confetti(40); }, 350);
+    setTimeout(() => { giftModal.hidden = false; document.body.style.overflow = 'hidden'; window.__lenis?.stop(); confetti(40); }, 350);
   };
-  function closeGift() { giftModal.hidden = true; $('#giftOpen').classList.remove('pop'); if (lb.hidden) document.body.style.overflow = ''; }
+  function closeGift() { if (giftModal.hidden) return; giftModal.hidden = true; $('#giftOpen').classList.remove('pop'); if (lb.hidden) { document.body.style.overflow = ''; window.__lenis?.start(); } }
   $('#giftOpen').addEventListener('click', openGift);
   $('#giftFab').addEventListener('click', openGift);
   giftModal.addEventListener('click', e => {
@@ -313,19 +321,69 @@
   };
   if (!reduce) requestAnimationFrame(draw);
 
-  /* ================= CUỘN: tiến trình, timeline, parallax ================= */
+  /* ================= CUỘN: tiến trình, timeline, zoom ảnh ================= */
   const bar = $('#progress'), top = $('#topBtn'), tl = $('#timeline'), fill = $('#tlFill'), heroBg = $('.hero-bg');
-  const onScroll = () => {
-    const max = document.documentElement.scrollHeight - innerHeight;
-    bar.style.width = (max > 0 ? scrollY / max * 100 : 0) + '%';
-    top.classList.toggle('show', scrollY > innerHeight);
-    const r = tl.getBoundingClientRect();
-    const p = Math.min(1, Math.max(0, (innerHeight * .6 - r.top) / r.height));
-    fill.style.height = p * 100 + '%';
-    if (!reduce && scrollY < innerHeight) heroBg.style.translate = `0 ${scrollY * .35}px`;
+  const clamp01 = v => Math.min(1, Math.max(0, v));
+  const lerp = (a, b, k) => a + (b - a) * k;
+
+  // Mỗi khung ảnh: zoom-in dần + trôi nhẹ theo vị trí cuộn, được làm mượt bằng lerp
+  const zooms = new Map(); // el -> {z, y, tz, ty, hover, on}
+  const zio = new IntersectionObserver(es => es.forEach(e => { const s = zooms.get(e.target); if (s) s.on = e.isIntersecting; }),
+    { rootMargin: '25% 0px' });
+  const trackZoom = el => {
+    if (zooms.has(el)) return;
+    zooms.set(el, { z: 1.25, y: 0, tz: 1.25, ty: 0, hover: 0, on: false });
+    zio.observe(el);
   };
-  addEventListener('scroll', () => requestAnimationFrame(onScroll), { passive: true });
-  top.addEventListener('click', () => scrollTo({ top: 0, behavior: 'smooth' }));
+  $$('.ph').forEach(trackZoom);
+  $$('#gallery .g').forEach(g => {
+    const ph = $('.ph', g);
+    g.addEventListener('pointerenter', () => { zooms.get(ph).hover = 1; });
+    g.addEventListener('pointerleave', () => { zooms.get(ph).hover = 0; });
+  });
+
+  let fillP = 0, heroZ = 1;
+  const frame = () => {
+    const vh = innerHeight, max = document.documentElement.scrollHeight - vh;
+    bar.style.width = (max > 0 ? scrollY / max * 100 : 0) + '%';
+    top.classList.toggle('show', scrollY > vh);
+
+    const r = tl.getBoundingClientRect();
+    fillP = lerp(fillP, clamp01((vh * .6 - r.top) / r.height), .12);
+    fill.style.height = fillP * 100 + '%';
+
+    if (reduce) return;
+    // Hero: phóng to và trôi chậm khi cuộn khỏi màn hình đầu
+    if (scrollY < vh * 1.2) {
+      heroZ = lerp(heroZ, 1 + clamp01(scrollY / vh) * .18, .1);
+      heroBg.style.transform = `translate3d(0,${scrollY * .3}px,0) scale(${heroZ.toFixed(4)})`;
+    }
+    for (const [el, s] of zooms) {
+      if (!s.on) continue;
+      const b = el.getBoundingClientRect();
+      const t = clamp01((vh - b.top) / (vh + b.height)); // 0: vừa vào đáy · 1: rời đỉnh
+      s.tz = 1.08 + t * .22 + s.hover * .07;
+      s.ty = (.5 - t) * 8;
+      s.z = lerp(s.z, s.tz, .08); s.y = lerp(s.y, s.ty, .08);
+      el.style.setProperty('--z', s.z.toFixed(4));
+      el.style.setProperty('--py', s.y.toFixed(3) + '%');
+    }
+  };
+
+  /* ---------- Cuộn mượt (Lenis) ---------- */
+  const lenis = (!reduce && window.Lenis) ? new Lenis({ lerp: .085, wheelMultiplier: .9, smoothWheel: true }) : null;
+  if (lenis) document.documentElement.classList.add('lenis');
+  if (lenis && document.body.classList.contains('locked')) lenis.stop();
+  const loop = time => { lenis?.raf(time); frame(); requestAnimationFrame(loop); };
+  requestAnimationFrame(loop);
+  const scrollToEl = target => lenis ? lenis.scrollTo(target, { duration: 1.6 }) : (typeof target === 'number' ? scrollTo({ top: target, behavior: 'smooth' }) : target.scrollIntoView({ behavior: 'smooth' }));
+  top.addEventListener('click', () => scrollToEl(0));
+  document.addEventListener('click', e => {
+    const a = e.target.closest('a[href^="#"]'); if (!a) return;
+    const t = $(a.getAttribute('href')); if (!t) return;
+    e.preventDefault(); scrollToEl(t);
+  });
+  window.__lenis = lenis;
 
   /* ---------- Ảnh chân dung nghiêng 3D theo chuột ---------- */
   $$('.tilt').forEach(el => {
@@ -339,5 +397,4 @@
   });
 
   watch(document);
-  onScroll();
 })();
